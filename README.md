@@ -68,7 +68,8 @@ You can use the following commands in your Twitch chat while the bot is running:
 * `!color <color1> [<color2>]` Change the colors of the Lightstrips. Colors can be scheme keywords defined in the config.js file (`red`, `blue`, `cyberpunk`...) or HTML hex codes (`#FF0080`).
 * `!resetlight` Reset the light settings to the default.
 * `!testraid` Test the red rotating light raid alert.
-* `!testsub` Test the flashing subscription/bits alert.
+* `!testbits` Test the flashing bits alert.
+* `!testsub` Test the flashing subscription alert.
 * `!testsubgift` Test the flashing sub gift alert.
 * `!testlights` Test each one of the lights to make sure their ID are correct. The results are displayed in the Node.js console.
 * `!lightstate` Display the current state of each light in the Node.js console.

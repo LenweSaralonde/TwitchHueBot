@@ -367,21 +367,28 @@ function doLightTest() {
  * Perform light effect when a raid occurs
  */
 function doRaidEffect() {
-	enqueueAsyncAction(() => rotatingLight([255, 64, 0], MIN_TEMPERATURE, 10));
+	enqueueAsyncAction(() => rotatingLight([255, 64, 0], MIN_TEMPERATURE, 13));
 }
 
 /**
  * Perform light effect when someone subscribes to the channel
  */
 function doSubscribeEffect() {
-	enqueueAsyncAction(() => flashingLight(MAX_TEMPERATURE, 4));
+	enqueueAsyncAction(() => flashingLight(MAX_TEMPERATURE, 5));
 }
 
 /**
  * Perform light effect when someone gifts several subs to the channel
  */
 function doSubGiftEffect() {
-	enqueueAsyncAction(() => flashingLight(MAX_TEMPERATURE, 10));
+	enqueueAsyncAction(() => flashingLight(MAX_TEMPERATURE, 11));
+}
+
+/**
+ * Perform light effect when someone gifts a certain amount of bits
+ */
+function doBitsEffect() {
+	enqueueAsyncAction(() => flashingLight(MAX_TEMPERATURE, 2));
 }
 
 /**
@@ -489,6 +496,13 @@ async function initBot() {
 				case 'lightstest':
 					return doLightTest();
 
+				// Test bits effect
+				case 'bittest':
+				case 'bitstest':
+				case 'testbit':
+				case 'testbits':
+					return doBitsEffect();
+
 				// Test subscribe effect
 				case 'subtest':
 				case 'testsub':
@@ -542,7 +556,7 @@ async function initBot() {
 	twitchClient.on('subscription', doSubscribeEffect);
 	twitchClient.on('resub', doSubscribeEffect);
 	twitchClient.on('submysterygift', (channel, username, numbOfSubs, methods, userstate) => {
-		if (numbOfSubs > 1) {
+		if (numbOfSubs >= 5) {
 			doSubGiftEffect();
 		} else {
 			doSubscribeEffect();
@@ -553,7 +567,7 @@ async function initBot() {
 	twitchClient.on('cheer', (channel, userstate, message) => {
 		// Do the subscribe
 		if (userstate.bits && userstate.bits >= 1000) {
-			doSubscribeEffect(); // Play the same effect as subscription
+			doBitsEffect();
 		}
 	});
 
