@@ -130,7 +130,7 @@ async function logLightState() {
 	for (let lightId of LIGHT_IDS) {
 		const lightName = LIGHT_NAMES[lightId];
 		const state = await hueBridgeApi.lights.getLightState(lightId);
-		console.log(`State for ${lightName} (${lightId})`, JSON.stringify(state));
+		console.log(`State for ${lightName} (${lightId}):`, JSON.stringify(state));
 	}
 }
 
@@ -138,7 +138,7 @@ async function logLightState() {
  * Reset the light settings to the default
  */
 async function resetLights() {
-	console.log(`Resetting lights to their default settings.`);
+	console.log(`Resetting lights to their default settings...`);
 	const promises = [];
 	for (let key of Object.keys(INITIAL_LIGHT_SETTINGS)) {
 		const lightId = CONFIG[key];
@@ -158,6 +158,7 @@ async function resetLights() {
 		promises.push(hueBridgeApi.lights.setLightState(lightId, new LightState().populate(lightSettings).transition(100)));
 	}
 	await Promise.all(promises);
+	console.log(`Done.`);
 }
 
 /**
@@ -193,7 +194,7 @@ async function lightTest() {
 	console.log(`Restoring state...`);
 	await restoreScene(currentScene);
 
-	console.log(`Light test complete!`);
+	console.log(`Light test complete.`);
 }
 
 /**
@@ -203,7 +204,7 @@ async function lightTest() {
  * @param {int} [num=6] Number of rotations to perform
  */
 async function rotatingLight(rgb = [255, 64, 0], k = MIN_TEMPERATURE, num = 8) {
-	console.log(`Playing rotating light effect.`);
+	console.log(`Playing rotating lights effect...`);
 
 	// Set the flashing rate to the maximum allowed by the API
 	const rate = 1000 / MAX_REQUESTS_PER_SECOND;
@@ -268,6 +269,8 @@ async function rotatingLight(rgb = [255, 64, 0], k = MIN_TEMPERATURE, num = 8) {
 
 	// Restore previous lights state
 	await restoreScene(currentScene);
+
+	console.log(`Rotating lights effect complete.`);
 }
 
 /**
@@ -276,7 +279,7 @@ async function rotatingLight(rgb = [255, 64, 0], k = MIN_TEMPERATURE, num = 8) {
  * @param {int} [num=4] Number of flashes to perform
  */
 async function flashingLight(k = MAX_TEMPERATURE, num = 8) {
-	console.log(`Playing flashing light effect.`);
+	console.log(`Playing flashing lights effect...`);
 
 	// Set the flashing rate to the maximum allowed by the API
 	const rate = 1000 / MAX_REQUESTS_PER_SECOND;
@@ -334,6 +337,8 @@ async function flashingLight(k = MAX_TEMPERATURE, num = 8) {
 
 	// Restore previous lights state
 	await restoreScene(currentScene);
+
+	console.log(`Flashing lights effect complete.`);
 }
 
 /**
@@ -406,8 +411,8 @@ function doChangeSceneColor(message) {
 		const hex2 = matches[4] || hex1;
 		const rgb1 = [parseInt(hex1.substring(0, 1), 16), parseInt(hex1.substring(2, 3), 16), parseInt(hex1.substring(4, 5), 16)];
 		const rgb2 = [parseInt(hex2.substring(0, 1), 16), parseInt(hex2.substring(2, 3), 16), parseInt(hex2.substring(4, 5), 16)];
-		settings.push({ on: true, rgb: rgb1 });
-		settings.push({ on: true, rgb: rgb2 });
+		settings.push({ on: true, rgb: rgb1, name: rgb1 });
+		settings.push({ on: true, rgb: rgb2, name: rgb2 });
 	} else {
 		// Set by color scheme name
 		message = ' ' + message.toLowerCase().replace(/\s+/g, ' ') + ' ';
@@ -423,7 +428,7 @@ function doChangeSceneColor(message) {
 					const order = position + ((colorScheme.settings.length === 1) ? message.length : 0);
 					for (let setting of colorScheme.settings) {
 						// Keep the order to order the colors afterwards
-						settings.push({ ...setting, order });
+						settings.push({ ...setting, order, name: keyword });
 					}
 				}
 			}
@@ -432,6 +437,7 @@ function doChangeSceneColor(message) {
 
 	if (settings.length === 0) {
 		// No setting: no color change.
+		console.log(`Unknown color scheme.`);
 		return;
 	} else if (settings.length === 1) {
 		// Duplicate setting
@@ -440,6 +446,10 @@ function doChangeSceneColor(message) {
 
 	// Reorder color by their order in the message string
 	settings.sort((a, b) => (a.order || 0) - (b.order || 0));
+
+	// Display console message
+	const schemeName = (settings[0].name !== settings[1].name) ? `${settings[0].name} ${settings[1].name}` : settings[0].name;
+	console.log(`Setting color scheme: ${schemeName}...`);
 
 	// Apply changes
 	enqueueAsyncAction(() => Promise.all([
@@ -455,6 +465,8 @@ function doChangeSceneColor(message) {
 		settings[0].effect !== 'none' && hueBridgeApi.lights.setLightState(LEFT_LIGHTSTRIP_ID, new LightState().effect(settings[0].effect)),
 		settings[1].effect !== 'none' && hueBridgeApi.lights.setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().effect(settings[1].effect)),
 	]));
+
+	console.log(`Color scheme applied.`);
 }
 
 /**
@@ -464,7 +476,7 @@ async function initBot() {
 	// Connect to the Philips Hue bridge first
 	console.log(`Connecting to the Hue bridge...`);
 	await connectHueBridge();
-	console.log(`Connected!`);
+	console.log(`Hue bridge connected.`);
 
 	// Reset lights
 	doResetLights();
@@ -480,7 +492,7 @@ async function initBot() {
 		// Only accept commands from broadcaster
 		const command = getCommandName(message);
 		if (command !== null && context['display-name'] === TWITCH_CHANNEL) {
-			console.log(`Received ${command} command from broadcaster.`);
+			console.log(`Received ${command} command from broadcaster ${context['display-name']}.`);
 			switch (command) {
 				// Reset light settings
 				case 'resetlight':
@@ -537,25 +549,40 @@ async function initBot() {
 					return doChangeSceneColor(message);
 
 				default:
-					console.log('Unknown command');
+					console.log('Unknown command.');
 					return;
 			}
 		}
 
 		// Change scene color using points
 		if (context['custom-reward-id'] === COLOR_REWARD_ID) {
+			console.log(`${context['display-name']} redeemed color change using channel points.`);
 			doChangeSceneColor(message);
 		}
 	});
 
 	// Raid handler
-	twitchClient.on('raided', doRaidEffect);
+	twitchClient.on('raided', (channel, username, viewers) => {
+		console.log(`${username} raided with ${viewers}.`);
+		doRaidEffect();
+	});
 
 	// Subscription handlers
-	twitchClient.on('subgift', doSubscribeEffect);
-	twitchClient.on('subscription', doSubscribeEffect);
-	twitchClient.on('resub', doSubscribeEffect);
+	twitchClient.on('subgift', (channel, username, streakMonths, recipient, methods, userstate) => {
+		console.log(`${username} gave a subscription to ${recipient}.`);
+		doSubscribeEffect();
+	});
+	twitchClient.on('subscription', (channel, username, method, message, userstate) => {
+		console.log(`${username} subscribed to the channel.`);
+		doSubscribeEffect();
+	});
+	twitchClient.on('resub', (channel, username, months, message, userstate, methods) => {
+		let cumulativeMonths = ~~userstate["msg-param-cumulative-months"];
+		console.log(`${username} resubscribed to the channel (months: ${cumulativeMonths}).`);
+		doSubscribeEffect();
+	});
 	twitchClient.on('submysterygift', (channel, username, numbOfSubs, methods, userstate) => {
+		console.log(`${username} gave away ${numbOfSubs} subscriptions.`);
 		if (numbOfSubs >= 5) {
 			doSubGiftEffect();
 		} else {
@@ -565,7 +592,7 @@ async function initBot() {
 
 	// Bits handler
 	twitchClient.on('cheer', (channel, userstate, message) => {
-		// Do the subscribe
+		console.log(`${userstate['display-name']} cheered with ${userstate.bits} bits.`);
 		if (userstate.bits && userstate.bits >= 1000) {
 			doBitsEffect();
 		}
@@ -574,7 +601,7 @@ async function initBot() {
 	// Connect to Twitch chat
 	console.log(`Connecting to the Twitch chat...`);
 	twitchClient.connect();
-	console.log(`Connected!`);
+	console.log(`Twitch chat connected.`);
 }
 
 /**
