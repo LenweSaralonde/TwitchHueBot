@@ -50,6 +50,9 @@ let twitchClient;
 // Action queue promise
 let actionQueue = Promise.resolve();
 
+// Subgifts stack
+const subGifts = {};
+
 /**
  * Convert the temperature in Kelvin (K) into Mired color temperature (ct).
  * @param {number} k
@@ -470,6 +473,269 @@ function doChangeSceneColor(message) {
 }
 
 /**
+ * Push subgifts to the stack.
+ * @param {string} username
+ * @param {int} [amount=1]
+ */
+function pushSubGifts(username, amount = 1) {
+	if (subGifts[username] === undefined) {
+		subGifts[username] = amount;
+	} else {
+		subGifts[username] += amount;
+	}
+}
+
+/**
+ * Pop a subgift from the stack
+ * @param {string} username
+ * @return {boolean} true if a subgift count has been popped.
+ */
+function popSubGift(username) {
+	if (subGifts[username] === undefined) {
+		return false;
+	}
+	subGifts[username]--;
+	if (subGifts[username] <= 0) {
+		delete subGifts[username];
+	}
+	return true;
+}
+
+/**
+ * Twitch message handler
+ * @param {string} channel
+ * @param {object} context
+ * @param {string} message
+ * @param {boolean} self
+ */
+function onMessage(channel, context, message, self) {
+	// Don't listen to my own messages..
+	if (self) return;
+
+	// Only accept commands from broadcaster
+	const command = getCommandName(message);
+	if (command !== null && context['display-name'] === TWITCH_CHANNEL) {
+		const params = message.replace(/[ ]+/, ' ').split(' ').filter(e => e !== `!${command}`);
+		console.log(`Received ${command} command from broadcaster ${context['display-name']}.`);
+		switch (command) {
+			// Reset light settings
+			case 'resetlight':
+			case 'resetlights':
+			case 'lightreset':
+			case 'lightsreset':
+				return doResetLights();
+
+			// Perform light test
+			case 'testlight':
+			case 'lighttest':
+			case 'testlights':
+			case 'lightstest':
+				return doLightTest();
+
+			// Test bits effect
+			// Params: username, amount of bits
+			case 'bittest':
+			case 'bitstest':
+			case 'testbit':
+			case 'testbits':
+			case 'testcheer':
+				return onCheer(
+					channel,
+					{
+						'display-name': params[0] || 'Username',
+						'bits': parseInt(params[1] || '1', 10)
+					},
+					''
+				);
+
+			// Test subscribe effect
+			// Params: username, message
+			case 'subtest':
+			case 'testsub':
+			case 'subscribetest':
+			case 'testsubscribe':
+				return onSubscription(
+					channel,
+					params[0] || 'Username',
+					{},
+					params.splice(1).join(' '),
+					{}
+				);
+
+			// Test resub effect
+			// Params: username, total months, months streak, message
+			case 'resubtest':
+			case 'testresub':
+				return onResub(
+					channel,
+					params[0] || 'Username',
+					parseInt(params[2] || '1', 10),
+					params.splice(3).join(' '),
+					{
+						'msg-param-cumulative-months': params[1] || '1',
+						'msg-param-should-share-streak': true
+					},
+					{}
+				);
+
+			// Test sub gift effect
+			// Params: username, recipient, months streak
+			case 'subgifttest':
+			case 'testsubgift':
+				return onSubgift(
+					channel,
+					params[0] || 'Username',
+					parseInt(params[2] || '0', 10),
+					params[1] || 'Recipient',
+					{},
+					{}
+				);
+
+			// Test sub mystery gift effect
+			// Params: username, number of subs
+			case 'mysterysubgifttest':
+			case 'testmysterysubgift':
+			case 'subgiftstest':
+			case 'testsubgifts':
+				const giver = params[0] || 'Username';
+				const numbOfSubs = parseInt(params[1] || '1', 10);
+				onSubmysterygift(channel, giver, numbOfSubs, {}, {});
+				for (let i = 1; i <= numbOfSubs; i++) {
+					onSubgift(channel, giver, '1', `Recipient_${i}`, {}, {});
+				}
+				return;
+
+			// Test raid effect
+			// Params: username, number of viewers
+			case 'raidtest':
+			case 'testraid':
+				return onRaided(
+					channel,
+					params[0] || 'Username',
+					parseInt(params[1] || '666', 10)
+				)
+
+			// Test rotating lights effect
+			case 'testrotating':
+			case 'rotatingtest':
+			case 'gyrotest':
+			case 'testgyro':
+				return doRaidEffect();
+
+			// Log lights state
+			case 'lightstate':
+			case 'lightsstate':
+				return logLightState();
+
+			// Change scene colors
+			case 'color':
+			case 'colors':
+			case 'setcolor':
+			case 'setcolors':
+			case 'testcolor':
+			case 'testcolors':
+				return doChangeSceneColor(message);
+
+			default:
+				console.log('Unknown command.');
+				return;
+		}
+	}
+
+	// Change scene color using points
+	if (context['custom-reward-id'] === COLOR_REWARD_ID) {
+		console.log(`${context['display-name']} redeemed color change using channel points.`);
+		doChangeSceneColor(message);
+	}
+}
+
+/**
+ * Twitch raided handler
+ * @param {string} channel
+ * @param {string} username
+ * @param {int} viewers
+ */
+function onRaided(channel, username, viewers) {
+	console.log(`${username} raided with ${viewers} viewers.`);
+	doRaidEffect();
+}
+
+/**
+ * Twitch subgift handler
+ * @param {string} channel
+ * @param {string} username
+ * @param {int} streakMonths
+ * @param {string} recipient
+ * @param {object} methods
+ * @param {object} userstate
+ */
+function onSubgift(channel, username, streakMonths, recipient, methods, userstate) {
+	console.log(`${username} gave a subscription to ${recipient}.`);
+	if (!popSubGift(username)) {
+		doSubscribeEffect();
+	}
+}
+
+/**
+ * Twitch subscription handler
+ * @param {string} channel
+ * @param {string} username
+ * @param {object} method
+ * @param {string} message
+ * @param {object} userstate
+ */
+function onSubscription(channel, username, method, message, userstate) {
+	console.log(`${username} subscribed to the channel.`);
+	doSubscribeEffect();
+}
+
+/**
+ * Twitch resub handler
+ * @param {string} channel
+ * @param {string} username
+ * @param {int} streakMonths
+ * @param {string} message
+ * @param {object} userstate
+ * @param {object} methods
+ */
+function onResub(channel, username, streakMonths, message, userstate, methods) {
+	let cumulativeMonths = ~~userstate["msg-param-cumulative-months"];
+	console.log(`${username} resubscribed to the channel (total months: ${cumulativeMonths}).`);
+	doSubscribeEffect();
+}
+
+/**
+ * Twitch submysterygift handler
+ * @param {string} channel
+ * @param {string} username
+ * @param {int} numbOfSubs
+ * @param {object} methods
+ * @param {object} userstate
+ */
+function onSubmysterygift(channel, username, numbOfSubs, methods, userstate) {
+	console.log(`${username} gave away ${numbOfSubs} subscriptions.`);
+	pushSubGifts(username, numbOfSubs);
+	if (numbOfSubs >= 5) {
+		doSubGiftEffect();
+	} else {
+		doSubscribeEffect();
+	}
+}
+
+/**
+ * Twitch cheer handler
+ * @param {string} channel
+ * @param {object} userstate
+ * @param {string} message
+ */
+function onCheer(channel, userstate, message) {
+	console.log(`${userstate['display-name']} cheered with ${userstate.bits} bits.`);
+	if (userstate.bits && userstate.bits >= 1000) {
+		doBitsEffect();
+	}
+}
+
+/**
  * Init the Twitch bot
  */
 async function initBot() {
@@ -485,118 +751,19 @@ async function initBot() {
 	twitchClient = new tmi.Client({ channels: [TWITCH_CHANNEL] });
 
 	// Message handler
-	twitchClient.on('message', (channel, context, message, self) => {
-		// Don't listen to my own messages..
-		if (self) return;
-
-		// Only accept commands from broadcaster
-		const command = getCommandName(message);
-		if (command !== null && context['display-name'] === TWITCH_CHANNEL) {
-			console.log(`Received ${command} command from broadcaster ${context['display-name']}.`);
-			switch (command) {
-				// Reset light settings
-				case 'resetlight':
-				case 'resetlights':
-				case 'lightreset':
-				case 'lightsreset':
-					return doResetLights();
-
-				// Perform light test
-				case 'testlight':
-				case 'lighttest':
-				case 'testlights':
-				case 'lightstest':
-					return doLightTest();
-
-				// Test bits effect
-				case 'bittest':
-				case 'bitstest':
-				case 'testbit':
-				case 'testbits':
-					return doBitsEffect();
-
-				// Test subscribe effect
-				case 'subtest':
-				case 'testsub':
-				case 'subscribetest':
-				case 'testsubscribe':
-					return doSubscribeEffect();
-
-				// Test sub gift effect
-				case 'subgifttest':
-				case 'testsubgift':
-					return doSubGiftEffect();
-
-				// Test raid effect
-				case 'raidtest':
-				case 'testraid':
-				case 'testrotating':
-				case 'rotatingtest':
-				case 'gyrotest':
-				case 'testgyro':
-					return doRaidEffect();
-
-				// Log lights state
-				case 'lightstate':
-				case 'lightsstate':
-					return logLightState();
-
-				// Change scene colors
-				case 'color':
-				case 'colors':
-				case 'setcolor':
-				case 'setcolors':
-					return doChangeSceneColor(message);
-
-				default:
-					console.log('Unknown command.');
-					return;
-			}
-		}
-
-		// Change scene color using points
-		if (context['custom-reward-id'] === COLOR_REWARD_ID) {
-			console.log(`${context['display-name']} redeemed color change using channel points.`);
-			doChangeSceneColor(message);
-		}
-	});
+	twitchClient.on('message', onMessage);
 
 	// Raid handler
-	twitchClient.on('raided', (channel, username, viewers) => {
-		console.log(`${username} raided with ${viewers}.`);
-		doRaidEffect();
-	});
+	twitchClient.on('raided', onRaided);
 
 	// Subscription handlers
-	twitchClient.on('subgift', (channel, username, streakMonths, recipient, methods, userstate) => {
-		console.log(`${username} gave a subscription to ${recipient}.`);
-		doSubscribeEffect();
-	});
-	twitchClient.on('subscription', (channel, username, method, message, userstate) => {
-		console.log(`${username} subscribed to the channel.`);
-		doSubscribeEffect();
-	});
-	twitchClient.on('resub', (channel, username, months, message, userstate, methods) => {
-		let cumulativeMonths = ~~userstate["msg-param-cumulative-months"];
-		console.log(`${username} resubscribed to the channel (months: ${cumulativeMonths}).`);
-		doSubscribeEffect();
-	});
-	twitchClient.on('submysterygift', (channel, username, numbOfSubs, methods, userstate) => {
-		console.log(`${username} gave away ${numbOfSubs} subscriptions.`);
-		if (numbOfSubs >= 5) {
-			doSubGiftEffect();
-		} else {
-			doSubscribeEffect();
-		}
-	});
+	twitchClient.on('subgift', onSubgift);
+	twitchClient.on('subscription', onSubscription);
+	twitchClient.on('resub', onResub);
+	twitchClient.on('submysterygift', onSubmysterygift);
 
 	// Bits handler
-	twitchClient.on('cheer', (channel, userstate, message) => {
-		console.log(`${userstate['display-name']} cheered with ${userstate.bits} bits.`);
-		if (userstate.bits && userstate.bits >= 1000) {
-			doBitsEffect();
-		}
-	});
+	twitchClient.on('cheer', onCheer);
 
 	// Connect to Twitch chat
 	console.log(`Connecting to the Twitch chat...`);
