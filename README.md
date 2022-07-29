@@ -75,3 +75,27 @@ You can use the following commands in your Twitch chat while the bot is running:
 * `!testresub [<username> [<total months> [<months streak> [<message>]]]]` Test resub.
 * `!testsubgift [<username> [<recipient> [<months streak>]]]` Test single sub gift.
 * `!testsubgifts [<username> [<number of subs>]]` Test mystery multiple sub gift.
+
+## Trigger effects from external alert box (advanced)
+
+If you're using an external alert box such as Streamlabs Alert Box in conjunction with TwitchHueBot, the light effects might play out of sync with the alert box animation.
+
+To solve this, you can configure TwitchHueBot to trigger the light effects using a HTTP REST API instead of using Twitch's events, then add custom JS code to your alert box trigger TwitchHueBot's REST API.
+
+The available API endpoints are:
+* `/raid`: Channel is being raided.
+* `/subscribe`: One user subscribed to the channel.
+* `/subgift`: Several subscriptions have been given away in the channel.
+* `/bits`: A significant amount of bits have been given.
+
+To enable the HTTP REST API, set a port value to `HTTP_PORT` in `config.js` (ie `666`).
+
+### Configuration for Streamlabs Alert Box
+
+On Streamlabs, you have to set a custom `JS` for every alert you want to trigger an effect.
+
+For example, if TwitchHueBot's REST API runs on port `666`, to trigger the `subscribe` effect, use the following code:
+
+```javascript
+$.get('http://localhost:666/subscribe');
+```

@@ -1,4 +1,7 @@
 module.exports = {
+	// HTTP server port to trigger effects externally (optional)
+	HTTP_PORT: null, // id 666
+
 	// Twitch channel name
 	TWITCH_CHANNEL: 'MyTwitchChannel',
 
@@ -7,6 +10,9 @@ module.exports = {
 
 	// Username on the Hue bridge
 	HUE_BRIDGE_USERNAME: 'XXXXXXXXXXXX-XXXXXXXXXXXXXXXXXXXXXXXXXXX',
+
+	// Hue bridge IP (optional)
+	HUE_BRIDGE_IP: null, // ie '192.168.0.100'
 
 	// Key light IDs (as seen by the camera)
 	LEFT_KEY_LIGHT_ID: 1,

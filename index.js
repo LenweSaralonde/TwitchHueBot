@@ -1,13 +1,16 @@
 const tmi = require('tmi.js');
 const { v3, discovery } = require('node-hue-api');
 const LightState = v3.lightStates.LightState;
+const http = require('http');
 
 // Get configuration
 const CONFIG = require('./config.js');
 const {
+	HTTP_PORT,
 	TWITCH_CHANNEL,
 	COLOR_REWARD_ID,
 	HUE_BRIDGE_USERNAME,
+	HUE_BRIDGE_IP,
 	RIGHT_KEY_LIGHT_ID,
 	LEFT_KEY_LIGHT_ID,
 	LEFT_LIGHTSTRIP_ID,
@@ -49,6 +52,15 @@ let twitchClient;
 
 // Action queue promise
 let actionQueue = Promise.resolve();
+
+// Action are being cancelled
+let isActionCancelled = false;
+
+// Saved scene
+let lastSavedScene = null;
+
+// Function to be called after the scene has been restored
+let afterSceneRestore = null;
 
 // Subgifts stack
 const subGifts = {};
@@ -92,13 +104,38 @@ function enqueueAsyncAction(asyncAction) {
 }
 
 /**
+ * Send cancel signal to async actions.
+ */
+async function cancelActions() {
+	isActionCancelled = true;
+	enqueueAsyncAction(() => { isActionCancelled = false; });
+	await actionQueue;
+}
+
+/**
+ * Throw error when action signal is set.
+ * @throws {string}
+ */
+function abortOnCancel() {
+	if (isActionCancelled) {
+		throw 'ABORTED';
+	}
+}
+
+/**
  * Connect to the Hue bridge and returns the API object.
  * @return {Api}
  */
 async function connectHueBridge() {
-	// Find Hue bridge on the LAN
-	const foundBridges = await discovery.nupnpSearch();
-	const host = foundBridges[0].ipaddress;
+	let host;
+	if (!HUE_BRIDGE_IP) {
+		// Find Hue bridge on the LAN
+		const foundBridges = await discovery.nupnpSearch();
+		host = foundBridges[0].ipaddress;
+	} else {
+		// Use static IP
+		host = HUE_BRIDGE_IP;
+	}
 
 	// Connect to the bridge
 	hueBridgeApi = await v3.api.createLocal(host).connect(HUE_BRIDGE_USERNAME);
@@ -107,23 +144,55 @@ async function connectHueBridge() {
 }
 
 /**
- * Save the current scene.
- * @return {LightScene}
+ * Set light state
+ * @param {int} lightId
+ * @param {LightState} lightState
+ * @param {int} [transition]
+ * @returns {Promise}
  */
-async function saveScene() {
-	const savedScene = v3.model.createLightScene();
-	savedScene.name = SAVED_SCENE_NAME;
-	savedScene.lights = [...LIGHT_IDS];
-	return await hueBridgeApi.scenes.createScene(savedScene);
+async function setLightState(lightId, lightState, transition = null) {
+	if (!lightId) {
+		(transition !== null) && await delay(transition);
+		return;
+	}
+	if (transition !== null) {
+		lightState.transition(transition);
+	}
+	await hueBridgeApi.lights.setLightState(lightId, lightState);
 }
 
 /**
- * Restore the provided scene.
- * @param {LightScene} scene
+ * Save the current scene.
  */
-async function restoreScene(scene) {
-	await hueBridgeApi.scenes.activateScene(scene.id);
-	await hueBridgeApi.scenes.deleteScene(scene.id); // We don't need this anymore
+async function saveScene() {
+	// Scene has already been saved
+	if (lastSavedScene) {
+		return;
+	}
+
+	const lightIds = [...LIGHT_IDS].filter(id => !!id);
+	if (lightIds.length === 0) {
+		return;
+	}
+	const savedScene = v3.model.createLightScene();
+	savedScene.name = SAVED_SCENE_NAME;
+	savedScene.lights = lightIds;
+	lastSavedScene = await hueBridgeApi.scenes.createScene(savedScene);
+}
+
+/**
+ * Restore the last scene.
+ */
+async function restoreScene() {
+	if (lastSavedScene) {
+		await hueBridgeApi.scenes.activateScene(lastSavedScene.id);
+		await hueBridgeApi.scenes.deleteScene(lastSavedScene.id); // We don't need this anymore
+		if (afterSceneRestore) {
+			await afterSceneRestore();
+			afterSceneRestore = null;
+		}
+		lastSavedScene = null;
+	}
 }
 
 /**
@@ -154,14 +223,14 @@ async function resetLights() {
 
 		// Always effects in the first place
 		if (hasRgbSupport(lightId)) {
-			promises.push(hueBridgeApi.lights.setLightState(lightId, new LightState().effectNone()));
+			promises.push(setLightState(lightId, new LightState().effectNone()));
 		}
 
 		// Apply light settings
-		promises.push(hueBridgeApi.lights.setLightState(lightId, new LightState().populate(lightSettings).transition(100)));
+		promises.push(setLightState(lightId, new LightState().populate(lightSettings), 100));
 	}
 	await Promise.all(promises);
-	console.log(`Done.`);
+	console.log(`Resetting lights done.`);
 }
 
 /**
@@ -169,35 +238,50 @@ async function resetLights() {
  */
 async function lightTest() {
 	console.log(`Light test starting...`);
-	const currentScene = await saveScene();
+	await saveScene();
 
-	// Turn all the lights off
-	const promises = [];
-	promises.push(hueBridgeApi.lights.setLightState(LEFT_LIGHTSTRIP_ID, new LightState().effectNone()));
-	promises.push(hueBridgeApi.lights.setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().effectNone()));
-	for (let lightId of LIGHT_IDS) {
-		promises.push(hueBridgeApi.lights.setLightState(lightId, new LightState().off().transition(0)));
-	}
-	await Promise.all(promises);
+	try {
+		abortOnCancel();
 
-	await delay(1500);
-
-	// Make each light blink
-	for (let lightId of LIGHT_IDS) {
-		console.log(`Testing ${LIGHT_NAMES[lightId]} with ID ${lightId}...`);
-		for (let blink = 1; blink <= 6; blink++) {
-			await hueBridgeApi.lights.setLightState(lightId, new LightState().on().ct(kToCt(6500)).bri(254).transition(250));
-			await hueBridgeApi.lights.setLightState(lightId, new LightState().off().transition(250));
+		// Turn all the lights off
+		const promises = [];
+		promises.push(setLightState(LEFT_LIGHTSTRIP_ID, new LightState().effectNone()));
+		promises.push(setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().effectNone()));
+		for (let lightId of LIGHT_IDS) {
+			promises.push(setLightState(lightId, new LightState().off(), 0));
 		}
+		await Promise.all(promises);
+
+		abortOnCancel();
+
+		await delay(1500);
+
+		// Make each light blink
+		for (let lightId of LIGHT_IDS) {
+			console.log(`Testing ${LIGHT_NAMES[lightId]} with ID ${lightId}...`);
+			for (let blink = 1; blink <= 6; blink++) {
+				abortOnCancel();
+				await setLightState(lightId, new LightState().on().ct(kToCt(6500)).bri(254), 250);
+				abortOnCancel();
+				await setLightState(lightId, new LightState().off(), 250);
+			}
+		}
+
+		abortOnCancel();
+
+		await delay(1500);
+
+		abortOnCancel();
+
+		// Restore the previous lights state
+		console.log(`Restoring state...`);
+		await restoreScene();
+
+		console.log(`Light test complete.`);
+
+	} catch (e) {
+		console.log(`Light test stopped: ${e}`);
 	}
-
-	await delay(1500);
-
-	// Restore the previous lights state
-	console.log(`Restoring state...`);
-	await restoreScene(currentScene);
-
-	console.log(`Light test complete.`);
 }
 
 /**
@@ -215,65 +299,84 @@ async function rotatingLight(rgb = [255, 64, 0], k = MIN_TEMPERATURE, num = 8) {
 	// Convert color temperature
 	const ct = kToCt(k);
 
-	// Get the current lights state
-	const currentScene = await saveScene();
+	// Save the current lights state
+	await saveScene();
 
 	// Prepare light states
-	const offState = new LightState().bri(1).transition(rate);
-	const onState = new LightState().bri(254).transition(rate);
+	const offState = new LightState().bri(1);
+	const onState = new LightState().bri(254);
 
-	// Disable effects and unneeded lights
-	await Promise.all([
-		hueBridgeApi.lights.setLightState(BACK_LIGHT_ID, new LightState().off().transition(rate)),
-		hueBridgeApi.lights.setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().effectNone()),
-		hueBridgeApi.lights.setLightState(LEFT_LIGHTSTRIP_ID, new LightState().effectNone()),
-	]);
+	try {
+		abortOnCancel();
 
-	// Set initial state
-	// 0 0
-	// 1 1
-	await Promise.all([
-		hueBridgeApi.lights.setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().on().rgb(rgb).bri(1).transition(rate)),
-		hueBridgeApi.lights.setLightState(LEFT_LIGHTSTRIP_ID, new LightState().on().rgb(rgb).bri(1).transition(rate)),
-		hueBridgeApi.lights.setLightState(LEFT_KEY_LIGHT_ID, new LightState().on().ct(ct).bri(254).transition(rate)),
-		hueBridgeApi.lights.setLightState(RIGHT_KEY_LIGHT_ID, new LightState().on().ct(ct).bri(254).transition(rate)),
-	]);
-
-	// Perform rotating red light effect
-	for (let i = 1; i <= num; i++) {
-		// 0 1
-		// 0 1
+		// Disable effects and unneeded lights
 		await Promise.all([
-			hueBridgeApi.lights.setLightState(RIGHT_LIGHTSTRIP_ID, onState),
-			hueBridgeApi.lights.setLightState(LEFT_KEY_LIGHT_ID, offState),
+			setLightState(BACK_LIGHT_ID, new LightState().off(), rate),
+			setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().effectNone()),
+			setLightState(LEFT_LIGHTSTRIP_ID, new LightState().effectNone()),
 		]);
 
-		// 1 1
-		// 0 0
-		await Promise.all([
-			hueBridgeApi.lights.setLightState(LEFT_LIGHTSTRIP_ID, onState),
-			hueBridgeApi.lights.setLightState(RIGHT_KEY_LIGHT_ID, offState),
-		]);
+		abortOnCancel();
 
-		// 1 0
-		// 1 0
-		await Promise.all([
-			hueBridgeApi.lights.setLightState(LEFT_KEY_LIGHT_ID, onState),
-			hueBridgeApi.lights.setLightState(RIGHT_LIGHTSTRIP_ID, offState),
-		]);
-
+		// Set initial state
 		// 0 0
 		// 1 1
 		await Promise.all([
-			hueBridgeApi.lights.setLightState(RIGHT_KEY_LIGHT_ID, onState),
-			hueBridgeApi.lights.setLightState(LEFT_LIGHTSTRIP_ID, offState),
+			setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().on().rgb(rgb).bri(1), rate),
+			setLightState(LEFT_LIGHTSTRIP_ID, new LightState().on().rgb(rgb).bri(1), rate),
+			setLightState(LEFT_KEY_LIGHT_ID, new LightState().on().ct(ct).bri(254), rate),
+			setLightState(RIGHT_KEY_LIGHT_ID, new LightState().on().ct(ct).bri(254), rate),
 		]);
+
+		// Perform rotating red light effect
+		for (let i = 1; i <= num; i++) {
+
+			abortOnCancel();
+
+			// 0 1
+			// 0 1
+			await Promise.all([
+				setLightState(RIGHT_LIGHTSTRIP_ID, onState, rate),
+				setLightState(LEFT_KEY_LIGHT_ID, offState, rate),
+			]);
+
+			abortOnCancel();
+
+			// 1 1
+			// 0 0
+			await Promise.all([
+				setLightState(LEFT_LIGHTSTRIP_ID, onState, rate),
+				setLightState(RIGHT_KEY_LIGHT_ID, offState, rate),
+			]);
+
+			abortOnCancel();
+
+			// 1 0
+			// 1 0
+			await Promise.all([
+				setLightState(LEFT_KEY_LIGHT_ID, onState, rate),
+				setLightState(RIGHT_LIGHTSTRIP_ID, offState, rate),
+			]);
+
+			abortOnCancel();
+
+			// 0 0
+			// 1 1
+			await Promise.all([
+				setLightState(RIGHT_KEY_LIGHT_ID, onState, rate),
+				setLightState(LEFT_LIGHTSTRIP_ID, offState, rate),
+			]);
+		}
+
+		abortOnCancel();
+
+		// Restore previous lights state
+		await restoreScene();
+
+		console.log(`Rotating lights effect complete.`);
+	} catch (e) {
+		console.log(`Rotating lights effect stopped: ${e}`);
 	}
-
-	// Restore previous lights state
-	await restoreScene(currentScene);
-
-	console.log(`Rotating lights effect complete.`);
 }
 
 /**
@@ -290,58 +393,73 @@ async function flashingLight(k = MAX_TEMPERATURE, num = 8) {
 	// Convert color temperature
 	const ct = kToCt(k);
 
-	// Get the current lights state
-	const currentScene = await saveScene();
+	// Save the current lights state
+	await saveScene();
 
-	// Disable effects and unneeded lights
-	await Promise.all([
-		hueBridgeApi.lights.setLightState(BACK_LIGHT_ID, new LightState().off().transition(0)),
-		hueBridgeApi.lights.setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().effectNone()),
-		hueBridgeApi.lights.setLightState(LEFT_LIGHTSTRIP_ID, new LightState().effectNone()),
-	]);
+	try {
+		abortOnCancel();
 
-	// Set initial state
-	// 1 0
-	// 1 0
-	await Promise.all([
-		hueBridgeApi.lights.setLightState(RIGHT_KEY_LIGHT_ID, new LightState().on().ct(ct).bri(1).transition(0)),
-		hueBridgeApi.lights.setLightState(LEFT_KEY_LIGHT_ID, new LightState().on().ct(ct).bri(254).transition(0)),
-		hueBridgeApi.lights.setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().on().ct(ct).bri(1).transition(0)),
-		hueBridgeApi.lights.setLightState(LEFT_LIGHTSTRIP_ID, new LightState().on().ct(ct).bri(254).transition(0)),
-		delay(rate * 4)
-	]);
-
-	// Prepare light states
-	const offState = new LightState().bri(1).transition(0);
-	const onState = new LightState().bri(254).transition(0);
-
-	// Perform rotating red light effect
-	for (let i = 1; i <= num; i++) {
-		// 0 1
-		// 0 1
+		// Disable effects and unneeded lights
 		await Promise.all([
-			hueBridgeApi.lights.setLightState(LEFT_KEY_LIGHT_ID, offState),
-			hueBridgeApi.lights.setLightState(RIGHT_KEY_LIGHT_ID, onState),
-			hueBridgeApi.lights.setLightState(LEFT_LIGHTSTRIP_ID, offState),
-			hueBridgeApi.lights.setLightState(RIGHT_LIGHTSTRIP_ID, onState),
-			delay(rate * 4)
+			setLightState(BACK_LIGHT_ID, new LightState().off(), 0),
+			setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().effectNone()),
+			setLightState(LEFT_LIGHTSTRIP_ID, new LightState().effectNone()),
 		]);
 
+		abortOnCancel();
+
+		// Set initial state
 		// 1 0
 		// 1 0
 		await Promise.all([
-			hueBridgeApi.lights.setLightState(RIGHT_KEY_LIGHT_ID, offState),
-			hueBridgeApi.lights.setLightState(LEFT_KEY_LIGHT_ID, onState),
-			hueBridgeApi.lights.setLightState(RIGHT_LIGHTSTRIP_ID, offState),
-			hueBridgeApi.lights.setLightState(LEFT_LIGHTSTRIP_ID, onState),
+			setLightState(RIGHT_KEY_LIGHT_ID, new LightState().on().ct(ct).bri(1), 0),
+			setLightState(LEFT_KEY_LIGHT_ID, new LightState().on().ct(ct).bri(254), 0),
+			setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().on().ct(ct).bri(1), 0),
+			setLightState(LEFT_LIGHTSTRIP_ID, new LightState().on().ct(ct).bri(254), 0),
 			delay(rate * 4)
 		]);
+
+		// Prepare light states
+		const offState = new LightState().bri(1);
+		const onState = new LightState().bri(254);
+
+		// Perform rotating red light effect
+		for (let i = 1; i <= num; i++) {
+
+			abortOnCancel();
+
+			// 0 1
+			// 0 1
+			await Promise.all([
+				setLightState(LEFT_KEY_LIGHT_ID, offState, 0),
+				setLightState(RIGHT_KEY_LIGHT_ID, onState, 0),
+				setLightState(LEFT_LIGHTSTRIP_ID, offState, 0),
+				setLightState(RIGHT_LIGHTSTRIP_ID, onState, 0),
+				delay(rate * 4)
+			]);
+
+			abortOnCancel();
+
+			// 1 0
+			// 1 0
+			await Promise.all([
+				setLightState(RIGHT_KEY_LIGHT_ID, offState, 0),
+				setLightState(LEFT_KEY_LIGHT_ID, onState, 0),
+				setLightState(RIGHT_LIGHTSTRIP_ID, offState, 0),
+				setLightState(LEFT_LIGHTSTRIP_ID, onState, 0),
+				delay(rate * 4)
+			]);
+		}
+
+		abortOnCancel();
+
+		// Restore previous lights state
+		await restoreScene();
+
+		console.log(`Flashing lights effect complete.`);
+	} catch (e) {
+		console.log(`Flashing lights effect stopped: ${e}`);
 	}
-
-	// Restore previous lights state
-	await restoreScene(currentScene);
-
-	console.log(`Flashing lights effect complete.`);
 }
 
 /**
@@ -454,22 +572,33 @@ function doChangeSceneColor(message) {
 	const schemeName = (settings[0].name !== settings[1].name) ? `${settings[0].name} ${settings[1].name}` : settings[0].name;
 	console.log(`Setting color scheme: ${schemeName}...`);
 
-	// Apply changes
-	enqueueAsyncAction(() => Promise.all([
-		hueBridgeApi.lights.setLightState(LEFT_LIGHTSTRIP_ID, new LightState().effectNone()),
-		hueBridgeApi.lights.setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().effectNone()),
-		hueBridgeApi.lights.setLightState(LEFT_LIGHTSTRIP_ID, new LightState().populate({ ...settings[0], effect: 'none' }).transition(COLOR_TRANSITION)),
-		hueBridgeApi.lights.setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().populate({ ...settings[1], effect: 'none' }).transition(COLOR_TRANSITION)),
-		delay(COLOR_TRANSITION)
-	]));
+	const applyColors = async () => {
+		// Set color
+		await Promise.all([
+			setLightState(LEFT_LIGHTSTRIP_ID, new LightState().effectNone()),
+			setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().effectNone()),
+			setLightState(LEFT_LIGHTSTRIP_ID, new LightState().populate({ ...settings[0], effect: 'none' }), COLOR_TRANSITION),
+			setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().populate({ ...settings[1], effect: 'none' }), COLOR_TRANSITION),
+			delay(COLOR_TRANSITION)
+		]);
 
-	// Start effects after the transition ends
-	enqueueAsyncAction(() => Promise.all([
-		settings[0].effect !== 'none' && hueBridgeApi.lights.setLightState(LEFT_LIGHTSTRIP_ID, new LightState().effect(settings[0].effect)),
-		settings[1].effect !== 'none' && hueBridgeApi.lights.setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().effect(settings[1].effect)),
-	]));
+		// Start effects after the transition ends
+		await Promise.all([
+			settings[0].effect !== 'none' && setLightState(LEFT_LIGHTSTRIP_ID, new LightState().effect(settings[0].effect)),
+			settings[1].effect !== 'none' && setLightState(RIGHT_LIGHTSTRIP_ID, new LightState().effect(settings[1].effect)),
+		]);
 
-	console.log(`Color scheme applied.`);
+		console.log(`Color scheme ${schemeName} applied.`);
+	};
+
+	if (lastSavedScene) {
+		// There is a saved scene: Apply changes after it has been restored
+		afterSceneRestore = applyColors;
+		console.log(`The color scheme will be applied after the current effect is ended.`);
+	} else {
+		// Apply changes now
+		enqueueAsyncAction(applyColors);
+	}
 }
 
 /**
@@ -745,7 +874,7 @@ async function initBot() {
 	console.log(`Hue bridge connected.`);
 
 	// Reset lights
-	doResetLights();
+	await resetLights();
 
 	// Instanciate Twitch chat client
 	twitchClient = new tmi.Client({ channels: [TWITCH_CHANNEL] });
@@ -753,22 +882,53 @@ async function initBot() {
 	// Message handler
 	twitchClient.on('message', onMessage);
 
-	// Raid handler
-	twitchClient.on('raided', onRaided);
-
-	// Subscription handlers
-	twitchClient.on('subgift', onSubgift);
-	twitchClient.on('subscription', onSubscription);
-	twitchClient.on('resub', onResub);
-	twitchClient.on('submysterygift', onSubmysterygift);
-
-	// Bits handler
-	twitchClient.on('cheer', onCheer);
-
 	// Connect to Twitch chat
 	console.log(`Connecting to the Twitch chat...`);
 	twitchClient.connect();
 	console.log(`Twitch chat connected.`);
+
+	// Start HTTP server, if enabled
+	if (HTTP_PORT) {
+		const paths = {
+			'/raid': doRaidEffect,
+			'/subscribe': doSubscribeEffect,
+			'/subgift': doSubGiftEffect,
+			'/bits': doBitsEffect,
+		};
+
+		const server = http.createServer(async (req, res) => {
+			if (paths[req.url]) {
+				await cancelActions();
+				res.statusCode = 200;
+				res.setHeader('Content-Type', 'text/plain');
+				res.end('ok\n');
+				console.log(`Running ${req.url} from HTTP.`);
+				paths[req.url]();
+			} else {
+				res.statusCode = 404;
+				res.end('Resource not found\n');
+			}
+		});
+
+		server.listen(HTTP_PORT, 'localhost', () => {
+			console.log(`HTTP server running at http://localhost:${HTTP_PORT}/, not using Twitch events.`);
+		});
+	} else {
+
+		// Raid handler
+		twitchClient.on('raided', onRaided);
+
+		// Subscription handlers
+		twitchClient.on('subgift', onSubgift);
+		twitchClient.on('subscription', onSubscription);
+		twitchClient.on('resub', onResub);
+		twitchClient.on('submysterygift', onSubmysterygift);
+
+		// Bits handler
+		twitchClient.on('cheer', onCheer);
+
+		console.log(`HTTP server is not running, using direct Twitch events instead.`);
+	}
 }
 
 /**
