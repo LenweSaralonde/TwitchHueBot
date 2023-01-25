@@ -1,6 +1,6 @@
 module.exports = {
 	// HTTP server port to trigger effects externally (optional)
-	HTTP_PORT: null, // id 666
+	HTTP_PORT: null, // ie 666
 
 	// Twitch channel name
 	TWITCH_CHANNEL: 'MyTwitchChannel',
